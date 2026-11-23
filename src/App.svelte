@@ -1,0 +1,791 @@
+<script lang="ts">
+  import { onMount, tick } from 'svelte'
+  import BraillePages from './components/BraillePages.svelte'
+  import ChordPreview from './components/ChordPreview.svelte'
+  import NumberField from './components/NumberField.svelte'
+  import { cellChar, isCellChar } from './lib/braille'
+  import { ChordTracker } from './lib/chord'
+  import { BRAILLE_CODES } from './lib/codes'
+  import { findMistakes } from './lib/compare'
+  import { copyText, downloadText, exportText, importText } from './lib/export'
+  import { layout, locate, positionAtCol } from './lib/layout'
+  import { translate } from './lib/louis'
+  import { LIMITS, sanitizeSettings } from './lib/settings'
+  import { load, save } from './lib/storage'
+  import { toParagraphs } from './lib/text'
+
+  interface Snapshot {
+    doc: string
+    cursor: number
+  }
+
+  const baseUrl = import.meta.env.BASE_URL
+  const savedDoc = load('doc')
+  const savedSource = load('source')
+  const initialDoc = typeof savedDoc === 'string' ? savedDoc : ''
+
+  const settings = $state(sanitizeSettings(load('settings')))
+  let doc = $state(initialDoc)
+  let source = $state(typeof savedSource === 'string' ? savedSource : '')
+  let cursor = $state(initialDoc.length)
+  let view = $state<'typed' | 'answer'>('typed')
+  let expected = $state<string[] | null>(null)
+  let translating = $state(false)
+  let translateError = $state('')
+  let louisVersion = $state('')
+  let pendingDots = $state(0)
+  let focused = $state(false)
+  let notice = $state('')
+  let historySize = $state({ undo: 0, redo: 0 })
+  let paper = $state<HTMLElement>()
+
+  const chord = new ChordTracker()
+  const undoStack: Snapshot[] = []
+  const redoStack: Snapshot[] = []
+  let lastEdit = { kind: '', time: 0 }
+  let goalCol: number | null = null
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined
+
+  const pages = $derived(layout(doc, settings))
+  const lines = $derived(pages.flatMap((p) => p.lines))
+  const answerDoc = $derived(expected ? expected.join('\n') : '')
+  const answerPages = $derived(layout(answerDoc, settings))
+  const mistakes = $derived(expected && settings.showMistakes ? findMistakes(doc, expected.join(' ')) : null)
+  const cellsTyped = $derived([...doc].filter(isCellChar).length)
+  const position = $derived.by(() => {
+    const caret = locate(lines, cursor)
+    let rest = caret.line
+    for (const page of pages) {
+      if (rest < page.lines.length) return { page: page.number, line: rest + 1, cell: caret.col + 1 }
+      rest -= page.lines.length
+    }
+    return { page: 1, line: 1, cell: 1 }
+  })
+
+  // Translate the print text whenever it or the braille code changes (debounced).
+  $effect(() => {
+    const paragraphs = toParagraphs(source, settings.rejoinHyphens)
+    const table = (BRAILLE_CODES.find((c) => c.id === settings.code) ?? BRAILLE_CODES[0]).table
+    if (paragraphs.length === 0) {
+      expected = null
+      translating = false
+      translateError = ''
+      return
+    }
+    let cancelled = false
+    translating = true
+    const timer = setTimeout(async () => {
+      try {
+        const result = await translate(table, paragraphs)
+        if (cancelled) return
+        expected = result.braille
+        louisVersion = result.version
+        translateError = ''
+      } catch (err) {
+        if (!cancelled) translateError = err instanceof Error ? err.message : String(err)
+      } finally {
+        if (!cancelled) translating = false
+      }
+    }, 250)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  })
+
+  $effect(() => save('settings', { ...settings }))
+  $effect(() => {
+    const value = doc
+    const timer = setTimeout(() => save('doc', value), 300)
+    return () => clearTimeout(timer)
+  })
+  $effect(() => {
+    const value = source
+    const timer = setTimeout(() => save('source', value), 300)
+    return () => clearTimeout(timer)
+  })
+
+  onMount(() => paper?.focus())
+
+  // --- Editing -------------------------------------------------------------------------
+
+  function syncHistory() {
+    historySize = { undo: undoStack.length, redo: redoStack.length }
+  }
+
+  /** Records an undo step. Consecutive edits of the same kind are undone together. */
+  function remember(kind: string) {
+    const now = Date.now()
+    if (kind !== lastEdit.kind || now - lastEdit.time > 1500 || undoStack.length === 0) {
+      undoStack.push({ doc, cursor })
+      if (undoStack.length > 1000) undoStack.shift()
+    }
+    lastEdit = { kind, time: now }
+    redoStack.length = 0
+    syncHistory()
+  }
+
+  function apply(next: string, nextCursor: number, kind: string) {
+    remember(kind)
+    doc = next
+    cursor = nextCursor
+    goalCol = null
+    revealCaret()
+  }
+
+  function insert(text: string) {
+    apply(doc.slice(0, cursor) + text + doc.slice(cursor), cursor + text.length, 'type')
+  }
+
+  function backspace() {
+    if (cursor > 0) apply(doc.slice(0, cursor - 1) + doc.slice(cursor), cursor - 1, 'delete')
+  }
+
+  function deleteForward() {
+    if (cursor < doc.length) apply(doc.slice(0, cursor) + doc.slice(cursor + 1), cursor, 'delete')
+  }
+
+  function clearAll() {
+    if (doc.length === 0) return
+    lastEdit = { kind: '', time: 0 }
+    apply('', 0, 'clear')
+    flash('Cleared. Press Ctrl+Z to undo.')
+    paper?.focus()
+  }
+
+  /** Inserts pasted Unicode braille or Braille ASCII at the cursor, as one undo step. */
+  function pasteText(text: string) {
+    const pasted = importText(text)
+    if (pasted.doc.length === 0) {
+      flash('Nothing to paste: no braille in the clipboard')
+      return
+    }
+    lastEdit = { kind: '', time: 0 }
+    apply(doc.slice(0, cursor) + pasted.doc + doc.slice(cursor), cursor + pasted.doc.length, 'paste')
+    const cells = [...pasted.doc].filter(isCellChar).length
+    const from = pasted.format === 'ascii' ? ' from Braille ASCII' : ''
+    const skipped = pasted.skipped ? `, skipped ${plural(pasted.skipped, 'other character')}` : ''
+    flash(`Pasted ${plural(cells, 'cell')}${from}${skipped}`)
+  }
+
+  function onPaste(e: ClipboardEvent) {
+    const text = e.clipboardData?.getData('text/plain')
+    if (text === undefined) return
+    e.preventDefault()
+    pasteText(text)
+  }
+
+  async function pasteFromClipboard() {
+    view = 'typed'
+    await tick()
+    paper?.focus()
+    try {
+      pasteText(await navigator.clipboard.readText())
+    } catch {
+      flash('Could not read the clipboard. Click the page and press Ctrl+V instead.')
+    }
+  }
+
+  function restore(from: Snapshot[], to: Snapshot[]) {
+    const snapshot = from.pop()
+    if (!snapshot) return
+    to.push({ doc, cursor })
+    doc = snapshot.doc
+    cursor = Math.min(snapshot.cursor, snapshot.doc.length)
+    lastEdit = { kind: '', time: 0 }
+    goalCol = null
+    syncHistory()
+    revealCaret()
+  }
+
+  const undo = () => restore(undoStack, redoStack)
+  const redo = () => restore(redoStack, undoStack)
+
+  function moveTo(pos: number, keepGoal = false) {
+    cursor = Math.max(0, Math.min(doc.length, pos))
+    lastEdit = { kind: '', time: 0 }
+    if (!keepGoal) goalCol = null
+    revealCaret()
+  }
+
+  function moveVertical(direction: 1 | -1) {
+    const here = locate(lines, cursor)
+    goalCol ??= here.col
+    const target = here.line + direction
+    if (target < 0) moveTo(0, true)
+    else if (target >= lines.length) moveTo(doc.length, true)
+    else moveTo(positionAtCol(lines[target], goalCol), true)
+  }
+
+  function revealCaret() {
+    tick().then(() => paper?.querySelector('.caret')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }))
+  }
+
+  function nextMistake() {
+    if (!mistakes || mistakes.spots.length === 0) return
+    view = 'typed'
+    const spot = mistakes.spots.find((p) => p > cursor) ?? mistakes.spots[0]
+    tick().then(() => {
+      paper?.focus()
+      moveTo(spot)
+    })
+  }
+
+  // --- Keyboard ------------------------------------------------------------------------
+
+  function onKeyDown(e: KeyboardEvent) {
+    if (e.ctrlKey || e.metaKey) {
+      const key = e.key.toLowerCase()
+      if (key === 'z' && !e.altKey) {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+      } else if (key === 'y' && !e.altKey) {
+        e.preventDefault()
+        redo()
+      } else if (e.key === 'Enter') {
+        e.preventDefault()
+        insert('\f')
+      } else if (e.key === 'Home') {
+        e.preventDefault()
+        moveTo(0)
+      } else if (e.key === 'End') {
+        e.preventDefault()
+        moveTo(doc.length)
+      }
+      return // Leave other shortcuts (copy, find, reload, ...) to the browser.
+    }
+    if (e.altKey) return
+
+    if (ChordTracker.isDotKey(e.code)) {
+      e.preventDefault()
+      if (!e.repeat) {
+        chord.press(e.code)
+        pendingDots = chord.pending
+      }
+      return
+    }
+
+    const line = lines[locate(lines, cursor).line]
+    switch (e.key) {
+      case ' ':
+        insert(' ')
+        break
+      case 'Enter':
+        insert('\n')
+        break
+      case 'Tab':
+        if (e.shiftKey) return // Let Shift+Tab move focus out.
+        insert('\t')
+        break
+      case 'Backspace':
+        backspace()
+        break
+      case 'Delete':
+        deleteForward()
+        break
+      case 'ArrowLeft':
+        moveTo(cursor - 1)
+        break
+      case 'ArrowRight':
+        moveTo(cursor + 1)
+        break
+      case 'ArrowUp':
+        moveVertical(-1)
+        break
+      case 'ArrowDown':
+        moveVertical(1)
+        break
+      case 'Home':
+        moveTo(line.start)
+        break
+      case 'End':
+        moveTo(line.end)
+        break
+      case 'Escape':
+        paper?.blur()
+        break
+      default:
+        return
+    }
+    e.preventDefault()
+  }
+
+  function onKeyUp(e: KeyboardEvent) {
+    if (!ChordTracker.isDotKey(e.code)) return
+    e.preventDefault()
+    const dots = chord.release(e.code)
+    pendingDots = chord.pending
+    if (dots) insert(cellChar(dots))
+  }
+
+  function dropChord() {
+    chord.reset()
+    pendingDots = 0
+  }
+
+  // --- Export --------------------------------------------------------------------------
+
+  function flash(message: string) {
+    notice = message
+    clearTimeout(noticeTimer)
+    noticeTimer = setTimeout(() => (notice = ''), 2200)
+  }
+
+  const exportedText = () => exportText(doc, pages, settings.exportFormat, settings.exportLayout)
+
+  async function copyExport() {
+    flash((await copyText(exportedText())) ? 'Copied to clipboard' : 'Could not copy')
+  }
+
+  function downloadExport() {
+    downloadText(exportedText(), settings.exportFormat === 'ascii' ? 'braille-ascii.txt' : 'braille-unicode.txt')
+  }
+
+  const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`
+</script>
+
+<svelte:window onblur={dropChord} />
+
+<div class="app" class:no-empty-dots={!settings.showEmptyDots} style:--cw="{settings.cellSize}px">
+  <header class="topbar">
+    <div class="brand">
+      <img src="{baseUrl}favicon.svg" alt="" width="28" height="28" />
+      <span>Better Braille</span>
+    </div>
+
+    <div class="segmented" role="tablist" aria-label="View">
+      <button role="tab" aria-selected={view === 'typed'} onclick={() => (view = 'typed')}>Your braille</button>
+      <button
+        role="tab"
+        aria-selected={view === 'answer'}
+        disabled={!expected}
+        title={expected ? undefined : 'Paste print text first'}
+        onclick={() => (view = 'answer')}>Correct braille</button
+      >
+    </div>
+
+    <div class="toolbar">
+      <button class="ghost" onclick={pasteFromClipboard} title="Paste Unicode braille or Braille ASCII (Ctrl+V)">Paste</button>
+      <button class="ghost" onclick={undo} disabled={historySize.undo === 0} title="Undo (Ctrl+Z)">Undo</button>
+      <button class="ghost" onclick={redo} disabled={historySize.redo === 0} title="Redo (Ctrl+Shift+Z)">Redo</button>
+      <button class="ghost danger" onclick={clearAll} disabled={doc.length === 0}>Clear</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <section class="editor">
+      {#if view === 'typed'}
+        <div
+          class="paper"
+          bind:this={paper}
+          tabindex="0"
+          role="textbox"
+          aria-multiline="true"
+          aria-label="Braille document. Type with S D F J K L."
+          onkeydown={onKeyDown}
+          onkeyup={onKeyUp}
+          onpaste={onPaste}
+          onfocus={() => (focused = true)}
+          onblur={() => {
+            focused = false
+            dropChord()
+          }}
+        >
+          <BraillePages
+            {pages}
+            docLength={doc.length}
+            cellsPerLine={settings.cellsPerLine}
+            linesPerPage={settings.linesPerPage}
+            paged={settings.pageBreaks}
+            showMarks={settings.showMarks}
+            {cursor}
+            wrong={mistakes?.wrong}
+            missing={mistakes?.missing}
+            onpick={(pos) => {
+              paper?.focus()
+              moveTo(pos)
+            }}
+          />
+        </div>
+      {:else}
+        <div class="paper readonly" aria-label="Correct braille">
+          <BraillePages
+            pages={answerPages}
+            docLength={answerDoc.length}
+            cellsPerLine={settings.cellsPerLine}
+            linesPerPage={settings.linesPerPage}
+            paged={settings.pageBreaks}
+            showMarks={settings.showMarks}
+          />
+        </div>
+      {/if}
+
+      <footer class="statusbar">
+        <ChordPreview dots={pendingDots} />
+        {#if view === 'typed'}
+          <div class="where">
+            <strong>Page {position.page}</strong>
+            <span>Line {position.line}</span>
+            <span>Cell {position.cell}</span>
+            <span class="muted">{plural(cellsTyped, 'cell')}</span>
+          </div>
+          <div class="keys">
+            {#if focused}
+              <span><kbd>Space</kbd> space</span>
+              <span><kbd>Enter</kbd> new line</span>
+              <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> page break</span>
+              <span><kbd>Tab</kbd> indent</span>
+              <span><kbd>Esc</kbd> leave page</span>
+            {:else}
+              <button class="link" onclick={() => paper?.focus()}>Click the page to start typing</button>
+            {/if}
+          </div>
+        {:else}
+          <div class="where"><strong>Correct braille</strong><span class="muted">read only</span></div>
+        {/if}
+      </footer>
+    </section>
+
+    <aside class="sidebar">
+      <section class="card">
+        <h2>Check against print</h2>
+        <label class="stack">
+          <span>Braille code</span>
+          <select bind:value={settings.code}>
+            {#each BRAILLE_CODES as code (code.id)}
+              <option value={code.id}>{code.label}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="stack">
+          <span>Print text</span>
+          <textarea
+            bind:value={source}
+            rows="7"
+            spellcheck="false"
+            placeholder="Paste the print text here, for example from OCR."
+          ></textarea>
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={settings.rejoinHyphens} />
+          <span>Join words hyphenated across lines</span>
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={settings.showMistakes} />
+          <span>Underline mistakes</span>
+        </label>
+
+        {#if translateError}
+          <p class="status error">Couldn't translate: {translateError}</p>
+        {:else if translating && !expected}
+          <p class="status muted">Translating…</p>
+        {:else if expected && mistakes}
+          <div class="status">
+            {#if mistakes.spots.length === 0}
+              <span class="ok">No mistakes so far</span>
+            {:else}
+              <span class="bad">{plural(mistakes.spots.length, 'mistake')}</span>
+              <button class="small" onclick={nextMistake}>Next mistake</button>
+            {/if}
+            {#if mistakes.remaining > 0}
+              <span class="muted">{plural(mistakes.remaining, 'cell')} left to type</span>
+            {/if}
+          </div>
+        {/if}
+        {#if louisVersion}
+          <p class="hint">Translated with liblouis {louisVersion}</p>
+        {/if}
+      </section>
+
+      <section class="card">
+        <h2>Page layout</h2>
+        <NumberField label="Cells per line" bind:value={settings.cellsPerLine} min={LIMITS.cellsPerLine[0]} max={LIMITS.cellsPerLine[1]} />
+        <label class="check">
+          <input type="checkbox" bind:checked={settings.pageBreaks} />
+          <span>Split into pages</span>
+        </label>
+        {#if settings.pageBreaks}
+          <NumberField label="Lines per page" bind:value={settings.linesPerPage} min={LIMITS.linesPerPage[0]} max={LIMITS.linesPerPage[1]} />
+        {/if}
+        <NumberField label="Tab width (cells)" bind:value={settings.tabWidth} min={LIMITS.tabWidth[0]} max={LIMITS.tabWidth[1]} />
+        <label class="range">
+          <span>Cell size</span>
+          <input type="range" bind:value={settings.cellSize} min={LIMITS.cellSize[0]} max={LIMITS.cellSize[1]} />
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={settings.showEmptyDots} />
+          <span>Show empty dot positions</span>
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={settings.showMarks} />
+          <span>Show line ends and tabs</span>
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>Copy or save</h2>
+        <div class="segmented full" role="radiogroup" aria-label="Format">
+          <button role="radio" aria-checked={settings.exportFormat === 'unicode'} onclick={() => (settings.exportFormat = 'unicode')}
+            >Unicode braille</button
+          >
+          <button role="radio" aria-checked={settings.exportFormat === 'ascii'} onclick={() => (settings.exportFormat = 'ascii')}
+            >Braille font (ASCII)</button
+          >
+        </div>
+        <p class="hint">
+          {#if settings.exportFormat === 'unicode'}
+            Braille characters (⠃⠗⠇) that show as dots in any app.
+          {:else}
+            Letters and symbols (BRL) that show as dots in a braille font such as SimBraille. Same as a .brf file.
+          {/if}
+        </p>
+        <label class="check">
+          <input type="checkbox" bind:checked={settings.exportLayout} />
+          <span>Keep line and page breaks</span>
+        </label>
+        <div class="row">
+          <button class="primary" onclick={copyExport} disabled={doc.length === 0}>Copy</button>
+          <button onclick={downloadExport} disabled={doc.length === 0}>Save as .txt</button>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  {#if notice}
+    <div class="toast" role="status">{notice}</div>
+  {/if}
+</div>
+
+<style>
+  .app {
+    --ch: calc(var(--cw) * 1.6);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100dvh;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 650;
+    font-size: 16px;
+    letter-spacing: -0.01em;
+  }
+
+  .brand img {
+    border-radius: 7px;
+  }
+
+  .toolbar {
+    margin-left: auto;
+    display: flex;
+    gap: 4px;
+  }
+
+  .workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 340px;
+    gap: 16px;
+    padding: 16px;
+    min-height: 0;
+  }
+
+  .editor {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    overflow: hidden;
+  }
+
+  .paper {
+    flex: 1;
+    overflow: auto;
+    outline: none;
+  }
+
+  .statusbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 13px;
+    flex-wrap: wrap;
+  }
+
+  .where {
+    display: flex;
+    gap: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .keys {
+    margin-left: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow: auto;
+    min-height: 0;
+  }
+
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+
+  h2 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+
+  .stack {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 14px;
+  }
+
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .range {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 14px;
+  }
+
+  .range input {
+    width: 140px;
+  }
+
+  textarea {
+    resize: vertical;
+    min-height: 120px;
+  }
+
+  .status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    margin: 0;
+    font-size: 14px;
+  }
+
+  .ok {
+    color: var(--ok);
+    font-weight: 600;
+  }
+
+  .bad,
+  .error {
+    color: var(--error);
+    font-weight: 600;
+  }
+
+  .muted {
+    color: var(--muted);
+  }
+
+  .hint {
+    margin: -4px 0 0;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+
+  .row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .row button {
+    flex: 1;
+  }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    padding: 10px 16px;
+    border-radius: 10px;
+    background: var(--text);
+    color: var(--bg);
+    font-size: 14px;
+    box-shadow: var(--shadow);
+  }
+
+  @media (max-width: 960px) {
+    .app {
+      height: auto;
+      min-height: 100dvh;
+    }
+
+    .workspace {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .editor {
+      height: 70dvh;
+    }
+
+    .sidebar {
+      overflow: visible;
+    }
+
+    .keys {
+      display: none;
+    }
+  }
+
+  @media (max-width: 560px) {
+    .topbar {
+      flex-wrap: wrap;
+    }
+
+    .brand span {
+      display: none;
+    }
+  }
+</style>
