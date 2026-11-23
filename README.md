@@ -51,6 +51,15 @@ or end of the line or document.
 Some keyboards can't register six keys at once, so a few chords may lose dots. If that happens,
 try another keyboard or test yours with an online "key rollover" tester.
 
+## Typing braille into another app
+
+On Windows, [`tools/type_braille.ahk`](tools/type_braille.ahk) ([AutoHotkey](https://www.autohotkey.com)
+v2) types braille copied from here into any app that takes six-key chords: copy the braille
+(yours or the correct one, Unicode or Braille ASCII), click into the other app and press
+`PageDown`. `Esc` stops it. Spaces, line breaks and tabs are typed too, and page breaks as
+`Ctrl`+`Enter`. Copy without line and page breaks if the other app wraps lines itself. The
+key, the timing and the page break keys are set at the top of the script.
+
 ## Develop
 
 Needs Node.js 22.12 or newer (20.19+ also works).
