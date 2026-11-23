@@ -13,8 +13,14 @@
     cursor?: number | null
     wrong?: Map<number, string> | null
     missing?: Map<number, string> | null
-    /** Caret position that was clicked, and the mistake clicked on (if any). */
-    onpick?: (pos: number, mistake: number | null) => void
+    /** Selected document range, if any. */
+    selection?: { start: number; end: number } | null
+    /** Caret position that was clicked, the mistake clicked on (if any), and whether Shift was held. */
+    onpick?: (pos: number, mistake: number | null, extend: boolean) => void
+    /** Caret position under the mouse while dragging out a selection. */
+    ondrag?: (pos: number) => void
+    /** Character that was double-clicked. */
+    ondoubleclick?: (index: number) => void
     /** Called with the document position of the mistake under the mouse, or null. */
     onmistakehover?: (pos: number | null) => void
   }
@@ -27,9 +33,12 @@
     paged,
     showMarks,
     cursor = null,
+    selection = null,
     wrong = null,
     missing = null,
     onpick,
+    ondrag,
+    ondoubleclick,
     onmistakehover,
   }: Props = $props()
 
@@ -42,8 +51,10 @@
     onmistakehover?.(el ? Number(el.dataset.mistake) : null)
   }
 
-  function pick(event: PointerEvent) {
-    if (!onpick || event.button !== 0) return
+  const isSelected = (i: number) => selection !== null && i >= selection.start && i < selection.end
+
+  /** Caret position under the pointer, and the mistake there (if any). */
+  function hit(event: PointerEvent | MouseEvent): { pos: number; mistake: number | null } | null {
     const target = event.target as HTMLElement
     const mistakeEl = target.closest<HTMLElement>('[data-mistake]')
     const mistake = mistakeEl ? Number(mistakeEl.dataset.mistake) : null
@@ -52,13 +63,36 @@
       const index = Number(item.dataset.i)
       const box = item.getBoundingClientRect()
       const after = item.dataset.eol === undefined && event.clientX > box.left + box.width / 2
-      onpick(after ? index + 1 : index, mistake)
-    } else if (mistake !== null) {
-      onpick(mistake, mistake) // the marker for missing cells
-    } else {
-      const line = target.closest<HTMLElement>('[data-end]')
-      if (line) onpick(Number(line.dataset.end), null)
+      return { pos: after ? index + 1 : index, mistake }
     }
+    if (mistake !== null) return { pos: mistake, mistake } // the marker for missing cells
+    const line = target.closest<HTMLElement>('[data-end]')
+    return line ? { pos: Number(line.dataset.end), mistake: null } : null
+  }
+
+  let dragging = false
+
+  function down(event: PointerEvent) {
+    if (!onpick || event.button !== 0) return
+    const at = hit(event)
+    if (!at) return
+    dragging = true
+    onpick(at.pos, at.mistake, event.shiftKey)
+  }
+
+  function drag(event: PointerEvent) {
+    if (!dragging) return
+    if (!(event.buttons & 1)) {
+      dragging = false
+      return
+    }
+    const at = hit(event)
+    if (at) ondrag?.(at.pos)
+  }
+
+  function doubleClick(event: MouseEvent) {
+    const item = (event.target as HTMLElement).closest<HTMLElement>('[data-i]')
+    if (item) ondoubleclick?.(Number(item.dataset.i))
   }
 </script>
 
@@ -71,13 +105,17 @@
   {/if}
 {/snippet}
 
+<svelte:window onpointerup={() => (dragging = false)} />
+
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="pages"
   class:marks={showMarks}
   style:--cols={cellsPerLine}
   style:--rows={paged ? linesPerPage : 0}
-  onpointerdown={pick}
+  onpointerdown={down}
+  onpointermove={drag}
+  ondblclick={doubleClick}
   onpointerover={hover}
   onpointerleave={() => onmistakehover?.(null)}
 >
@@ -96,6 +134,7 @@
                 <span
                   class="cell {DOT_CLASSES[cellDots(item.char)]}"
                   class:wrong={wrong?.has(item.index)}
+                  class:selected={isSelected(item.index)}
                   data-mistake={wrong?.has(item.index) ? item.index : undefined}
                   data-i={item.index}
                 ></span>
@@ -104,12 +143,13 @@
                   class="cell blank"
                   class:tab={item.kind === 'tab'}
                   class:wrong={wrong?.has(item.index)}
+                  class:selected={isSelected(item.index)}
                   style:--w={item.width}
                   data-mistake={wrong?.has(item.index) ? item.index : undefined}
                   data-i={item.index}
                 ></span>
               {:else}
-                <span class="eol" data-i={item.index} data-eol>
+                <span class="eol" class:selected={isSelected(item.index)} data-i={item.index} data-eol>
                   {#if item.kind === 'pagebreak'}<span class="pb">page break</span>{:else}<span class="nl">↵</span>{/if}
                 </span>
               {/if}
@@ -126,6 +166,8 @@
 
 <style>
   .pages {
+    user-select: none;
+    -webkit-user-select: none;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -180,6 +222,7 @@
   }
 
   .eol {
+    position: relative;
     display: flex;
     align-items: center;
     width: 0;
@@ -188,6 +231,16 @@
     font-size: 11px;
     color: var(--muted);
     user-select: none;
+  }
+
+  .eol.selected::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: calc(var(--cw) * 0.45);
+    background: var(--select-bg);
   }
 
   .eol > span {

@@ -16,6 +16,7 @@
   --dot-off: #e7e9ef;
   --error: #e5484d;
   --error-soft: #fde8e9;
+  --select-bg: rgb(79 70 229 / 0.18);
   --ok: #138a4e;
   --shadow: 0 1px 2px rgb(16 24 40 / 0.05), 0 6px 20px rgb(16 24 40 / 0.06);
   --radius: 12px;
@@ -46,6 +47,7 @@
     --dot-off: #2b303a;
     --error: #ff6b70;
     --error-soft: #3b1e22;
+    --select-bg: rgb(143 139 255 / 0.28);
     --ok: #4cc98a;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 20px rgb(0 0 0 / 0.25);
   }
@@ -257,6 +259,11 @@ kbd {
 .cell.wrong {
   background-color: var(--error-soft);
   cursor: help;
+}
+
+.cell.selected {
+  background-color: var(--select-bg);
+  border-radius: 0;
 }
 
 .cell.wrong::after {

@@ -8,6 +8,7 @@
   import { ChordTracker } from './lib/chord'
   import { BRAILLE_CODES } from './lib/codes'
   import { describeMistake, findMistakes, mistakeNear } from './lib/compare'
+  import { wordAt, wordEndAfter, wordStartBefore } from './lib/editing'
   import { copyText, downloadText, exportText, importText } from './lib/export'
   import { layout, locate, positionAtCol } from './lib/layout'
   import { translate } from './lib/louis'
@@ -21,6 +22,7 @@
   }
 
   const baseUrl = import.meta.env.BASE_URL
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
   const savedDoc = load('doc')
   const savedSource = load('source')
   const initialDoc = typeof savedDoc === 'string' ? savedDoc : ''
@@ -29,6 +31,8 @@
   let doc = $state(initialDoc)
   let source = $state(typeof savedSource === 'string' ? savedSource : '')
   let cursor = $state(initialDoc.length)
+  /** The other end of the selection; equal to `cursor` when nothing is selected. */
+  let anchor = $state(initialDoc.length)
   let view = $state<'typed' | 'answer'>('typed')
   let expected = $state<string[] | null>(null)
   let translating = $state(false)
@@ -59,6 +63,9 @@
   const answerPages = $derived(layout(answerDoc, settings))
   const mistakes = $derived(expected && settings.showMistakes ? findMistakes(doc, expected.join(' ')) : null)
   const cellsTyped = $derived([...doc].filter(isCellChar).length)
+  const selection = $derived({ start: Math.min(anchor, cursor), end: Math.max(anchor, cursor) })
+  const hasSelection = $derived(selection.start < selection.end)
+  const selectedCells = $derived([...doc.slice(selection.start, selection.end)].filter(isCellChar).length)
   const popupInfo = $derived.by(() => {
     const open = popup
     if (!open || !mistakes || view !== 'typed') return null
@@ -156,21 +163,68 @@
     remember(kind)
     doc = next
     cursor = nextCursor
+    anchor = nextCursor
     goalCol = null
     popup = null
     revealCaret()
   }
 
+  function replaceRange(start: number, end: number, text: string, kind: string) {
+    apply(doc.slice(0, start) + text + doc.slice(end), start + text.length, kind)
+  }
+
+  /** Types text, replacing the selection if there is one. Spaces and line breaks start a new
+   *  undo step, so undo takes back one word at a time. */
   function insert(text: string) {
-    apply(doc.slice(0, cursor) + text + doc.slice(cursor), cursor + text.length, 'type')
+    const kind = hasSelection ? 'replace' : /^\s+$/.test(text) ? 'space' : 'type'
+    replaceRange(selection.start, selection.end, text, kind)
   }
 
-  function backspace() {
-    if (cursor > 0) apply(doc.slice(0, cursor - 1) + doc.slice(cursor), cursor - 1, 'delete')
+  /** Deletes the selection if there is one, otherwise from the cursor to `target`. */
+  function deleteTo(target: number) {
+    if (hasSelection) return replaceRange(selection.start, selection.end, '', 'delete')
+    const to = Math.max(0, Math.min(doc.length, target))
+    if (to !== cursor) replaceRange(Math.min(to, cursor), Math.max(to, cursor), '', 'delete')
   }
 
-  function deleteForward() {
-    if (cursor < doc.length) apply(doc.slice(0, cursor) + doc.slice(cursor + 1), cursor, 'delete')
+  function selectAll() {
+    anchor = 0
+    cursor = doc.length
+    goalCol = null
+    if (popup?.pinned) popup = null
+  }
+
+  function selectWord(index: number) {
+    const [start, end] = wordAt(doc, index)
+    anchor = start
+    moveTo(end, { extend: true })
+  }
+
+  // Ctrl/Cmd+C and X copy the selection in the format chosen under "Copy or save".
+  const selectedText = () => exportText(doc.slice(selection.start, selection.end), [], settings.exportFormat, false)
+  let clipboardEventSeen = false
+
+  /** Lets the browser fire its copy/cut event (see onClipboard); if it doesn't, copies directly. */
+  function copySelection(cut: boolean) {
+    if (!hasSelection) return
+    clipboardEventSeen = false
+    const { start, end } = selection
+    const text = selectedText()
+    setTimeout(async () => {
+      if (clipboardEventSeen) return
+      const ok = await copyText(text)
+      paper?.focus()
+      if (!ok) flash('Could not copy')
+      else if (cut) replaceRange(start, end, '', 'cut')
+    })
+  }
+
+  function onClipboard(e: ClipboardEvent) {
+    if (!hasSelection || !e.clipboardData) return
+    clipboardEventSeen = true
+    e.preventDefault()
+    e.clipboardData.setData('text/plain', selectedText())
+    if (e.type === 'cut') replaceRange(selection.start, selection.end, '', 'cut')
   }
 
   function clearAll() {
@@ -181,7 +235,8 @@
     paper?.focus()
   }
 
-  /** Inserts pasted Unicode braille or Braille ASCII at the cursor, as one undo step. */
+  /** Inserts pasted Unicode braille or Braille ASCII at the cursor (replacing the selection),
+   *  as one undo step. */
   function pasteText(text: string) {
     const pasted = importText(text)
     if (pasted.doc.length === 0) {
@@ -189,7 +244,7 @@
       return
     }
     lastEdit = { kind: '', time: 0 }
-    apply(doc.slice(0, cursor) + pasted.doc + doc.slice(cursor), cursor + pasted.doc.length, 'paste')
+    replaceRange(selection.start, selection.end, pasted.doc, 'paste')
     const cells = [...pasted.doc].filter(isCellChar).length
     const from = pasted.format === 'ascii' ? ' from Braille ASCII' : ''
     const skipped = pasted.skipped ? `, skipped ${plural(pasted.skipped, 'other character')}` : ''
@@ -220,6 +275,7 @@
     to.push({ doc, cursor })
     doc = snapshot.doc
     cursor = Math.min(snapshot.cursor, snapshot.doc.length)
+    anchor = cursor
     lastEdit = { kind: '', time: 0 }
     goalCol = null
     popup = null
@@ -230,21 +286,22 @@
   const undo = () => restore(undoStack, redoStack)
   const redo = () => restore(redoStack, undoStack)
 
-  function moveTo(pos: number, keepGoal = false) {
+  /** Moves the cursor; with `extend`, the selection grows or shrinks instead of being dropped. */
+  function moveTo(pos: number, { keepGoal = false, extend = false } = {}) {
     cursor = Math.max(0, Math.min(doc.length, pos))
+    if (!extend) anchor = cursor
     lastEdit = { kind: '', time: 0 }
     if (!keepGoal) goalCol = null
     if (popup?.pinned) popup = null
     revealCaret()
   }
 
-  function moveVertical(direction: 1 | -1) {
+  function moveVertical(direction: 1 | -1, extend = false) {
     const here = locate(lines, cursor)
     goalCol ??= here.col
     const target = here.line + direction
-    if (target < 0) moveTo(0, true)
-    else if (target >= lines.length) moveTo(doc.length, true)
-    else moveTo(positionAtCol(lines[target], goalCol), true)
+    const pos = target < 0 ? 0 : target >= lines.length ? doc.length : positionAtCol(lines[target], goalCol)
+    moveTo(pos, { keepGoal: true, extend })
   }
 
   function revealCaret() {
@@ -310,37 +367,14 @@
   // --- Keyboard ------------------------------------------------------------------------
 
   function onKeyDown(e: KeyboardEvent) {
-    if (e.ctrlKey || e.metaKey) {
-      const key = e.key.toLowerCase()
-      if (key === 'z' && !e.altKey) {
-        e.preventDefault()
-        if (e.shiftKey) redo()
-        else undo()
-      } else if (key === 'y' && !e.altKey) {
-        e.preventDefault()
-        redo()
-      } else if (e.key === 'Enter') {
-        e.preventDefault()
-        insert('\f')
-      } else if (e.key === 'Home') {
-        e.preventDefault()
-        moveTo(0)
-      } else if (e.key === 'End') {
-        e.preventDefault()
-        moveTo(doc.length)
-      }
-      return // Leave other shortcuts (copy, find, reload, ...) to the browser.
-    }
-    if (e.altKey) return
+    // On Windows, Alt combinations belong to the browser (Alt+Left is Back).
+    if (e.altKey && !isMac) return
+    const primary = e.ctrlKey || e.metaKey // Ctrl, or Cmd on a Mac
+    const byWord = e.ctrlKey || e.altKey // Ctrl, or Option on a Mac
+    const extend = e.shiftKey
+    const line = lines[locate(lines, cursor).line]
 
-    // H (next to J, and not a dot key) explains the mistake at the cursor.
-    if (e.code === 'KeyH') {
-      e.preventDefault()
-      if (!e.repeat) explainAtCursor()
-      return
-    }
-
-    if (ChordTracker.isDotKey(e.code)) {
+    if (!primary && !e.altKey && ChordTracker.isDotKey(e.code)) {
       e.preventDefault()
       if (!e.repeat) {
         chord.press(e.code)
@@ -349,46 +383,80 @@
       return
     }
 
-    const line = lines[locate(lines, cursor).line]
     switch (e.key) {
-      case ' ':
-        insert(' ')
-        break
-      case 'Enter':
-        insert('\n')
-        break
-      case 'Tab':
-        if (e.shiftKey) return // Let Shift+Tab move focus out.
-        insert('\t')
-        break
       case 'Backspace':
-        backspace()
+        if (e.metaKey || (e.ctrlKey && e.shiftKey)) deleteTo(cursor === line.start ? cursor - 1 : line.start)
+        else if (byWord) deleteTo(wordStartBefore(doc, cursor))
+        else deleteTo(cursor - 1)
         break
       case 'Delete':
-        deleteForward()
+        if (e.metaKey) deleteTo(cursor === line.end ? cursor + 1 : line.end)
+        else if (byWord) deleteTo(wordEndAfter(doc, cursor))
+        else deleteTo(cursor + 1)
         break
       case 'ArrowLeft':
-        moveTo(cursor - 1)
+      case 'ArrowRight': {
+        const left = e.key === 'ArrowLeft'
+        if (e.metaKey) moveTo(left ? line.start : line.end, { extend })
+        else if (byWord) moveTo(left ? wordStartBefore(doc, cursor) : wordEndAfter(doc, cursor), { extend })
+        else if (hasSelection && !extend) moveTo(left ? selection.start : selection.end)
+        else moveTo(cursor + (left ? -1 : 1), { extend })
         break
-      case 'ArrowRight':
-        moveTo(cursor + 1)
-        break
+      }
       case 'ArrowUp':
-        moveVertical(-1)
-        break
       case 'ArrowDown':
-        moveVertical(1)
+        if (e.metaKey) moveTo(e.key === 'ArrowUp' ? 0 : doc.length, { extend })
+        else moveVertical(e.key === 'ArrowUp' ? -1 : 1, extend)
         break
       case 'Home':
-        moveTo(line.start)
+        moveTo(primary ? 0 : line.start, { extend })
         break
       case 'End':
-        moveTo(line.end)
+        moveTo(primary ? doc.length : line.end, { extend })
+        break
+      case 'Enter':
+        insert(primary ? '\f' : '\n')
+        break
+      case 'Tab':
+        if (e.shiftKey || primary || e.altKey) return // Shift+Tab moves focus out of the page
+        insert('\t')
+        break
+      case ' ':
+        if (primary || e.altKey) return
+        insert(' ')
         break
       case 'Escape':
         if (popup) popup = null
+        else if (hasSelection) moveTo(cursor)
         else paper?.blur()
         break
+      default:
+        if (primary && !e.altKey) return onShortcut(e)
+        if (e.altKey || e.code !== 'KeyH') return
+        // H (next to J, and not a dot key) explains the mistake at the cursor.
+        if (!e.repeat) explainAtCursor()
+    }
+    e.preventDefault()
+  }
+
+  /** Ctrl/Cmd + letter. Anything not handled here (paste, find, reload, ...) goes to the browser. */
+  function onShortcut(e: KeyboardEvent) {
+    const key = e.key.toLowerCase()
+    switch (key) {
+      case 'a':
+        selectAll()
+        break
+      case 'z':
+        if (e.shiftKey) redo()
+        else undo()
+        break
+      case 'y':
+        redo()
+        break
+      case 'c':
+      case 'x':
+        copySelection(key === 'x')
+        return // The browser now fires a copy or cut event.
       default:
         return
     }
@@ -509,6 +577,8 @@
           onkeydown={onKeyDown}
           onkeyup={onKeyUp}
           onpaste={onPaste}
+          oncopy={onClipboard}
+          oncut={onClipboard}
           onfocus={() => (focused = true)}
           onblur={() => {
             focused = false
@@ -523,15 +593,19 @@
             paged={settings.pageBreaks}
             showMarks={settings.showMarks}
             {cursor}
+            selection={hasSelection ? selection : null}
             wrong={mistakes?.wrong}
             missing={mistakes?.missing}
-            onpick={(pos, mistake) => {
+            onpick={(pos, mistake, extend) => {
               paper?.focus()
-              moveTo(pos)
+              moveTo(pos, { extend })
+              if (extend) return
               // Clicking a mistake explains it (also on touch screens, which have no hover).
               const run = mistake === null ? undefined : mistakes?.runs.find((r) => r.start <= mistake && mistake < r.end)
               if (run) popup = { start: run.start, pinned: true }
             }}
+            ondrag={(pos) => moveTo(pos, { extend: true })}
+            ondoubleclick={selectWord}
             onmistakehover={onMistakeHover}
           />
           {#if popupInfo}
@@ -569,7 +643,11 @@
             <strong>Page {position.page}</strong>
             <span>Line {position.line}</span>
             <span>Cell {position.cell}</span>
-            <span class="muted">{plural(cellsTyped, 'cell')}</span>
+            {#if hasSelection}
+              <span class="selected-count">{plural(selectedCells, 'cell')} selected</span>
+            {:else}
+              <span class="muted">{plural(cellsTyped, 'cell')}</span>
+            {/if}
           </div>
           <div class="keys">
             {#if focused}
@@ -915,6 +993,11 @@
 
   .muted {
     color: var(--muted);
+  }
+
+  .selected-count {
+    color: var(--accent);
+    font-weight: 550;
   }
 
   .hint {

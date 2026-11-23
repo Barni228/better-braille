@@ -21,18 +21,27 @@ Type braille on a normal keyboard and check it against the print text.
 
 | Key | Does |
 | --- | --- |
-| `F` `D` `S` `J` `K` `L` together | Type one braille cell |
+| `F` `D` `S` `J` `K` `L` together | Type one braille cell (replaces the selection, if any) |
 | `Space` | Space |
 | `Enter` | New line |
 | `Ctrl`+`Enter` | Page break |
 | `Tab` | Jump to the next tab stop |
-| `Backspace` / `Delete` | Delete before / after the cursor |
+| `Backspace` / `Delete` | Delete before / after the cursor, or the selection |
+| `Ctrl`+`Backspace` / `Ctrl`+`Delete` | Delete the word before / after the cursor |
+| `Ctrl`+`Shift`+`Backspace` | Delete to the start of the line |
 | Arrows, `Home`, `End` | Move the cursor (`Ctrl`+`Home`/`End`: start/end of document) |
-| `Ctrl`+`V` | Paste Unicode braille or Braille ASCII at the cursor |
-| `Ctrl`+`Z` / `Ctrl`+`Shift`+`Z` | Undo / redo |
+| `Ctrl`+`←` / `Ctrl`+`→` | Move one word |
+| `Shift` + any move, or drag, or `Shift`+click | Select; double-click selects a word |
+| `Ctrl`+`A` | Select everything |
+| `Ctrl`+`C` / `Ctrl`+`X` / `Ctrl`+`V` | Copy / cut / paste (copies in the format chosen under "Copy or save") |
+| `Ctrl`+`Z` / `Ctrl`+`Shift`+`Z` | Undo / redo (one word at a time) |
 | `F8` / `Shift`+`F8` | Next / previous mistake, with an explanation |
 | `H` | Explain the mistake at the cursor (press again to hide) |
-| `Esc` | Close the explanation, or leave the page (so `Tab` moves focus again) |
+| `Esc` | Close the explanation, clear the selection, or leave the page (so `Tab` moves focus again) |
+
+On a Mac, use `Cmd` instead of `Ctrl` and `Option` instead of `Ctrl` for word moves and
+deletes. `Cmd`+`Backspace` deletes to the start of the line, and `Cmd`+arrows go to the start
+or end of the line or document.
 
 Some keyboards can't register six keys at once, so a few chords may lose dots. If that happens,
 try another keyboard or test yours with an online "key rollover" tester.
