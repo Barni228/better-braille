@@ -8,9 +8,9 @@
   import { ChordTracker } from './lib/chord'
   import { BRAILLE_CODES } from './lib/codes'
   import { describeMistake, findMistakes, mistakeNear } from './lib/compare'
-  import { wordAt, wordEndAfter, wordStartBefore } from './lib/editing'
+  import { type Caret, caretForKey, placeCaret, wordAt, wordEndAfter, wordStartBefore } from './lib/editing'
   import { copyText, downloadText, exportText, importText } from './lib/export'
-  import { layout, locate, positionAtCol } from './lib/layout'
+  import { layout, locate } from './lib/layout'
   import { translate } from './lib/louis'
   import { LIMITS, sanitizeSettings } from './lib/settings'
   import { load, save } from './lib/storage'
@@ -61,11 +61,37 @@
   const lines = $derived(pages.flatMap((p) => p.lines))
   const answerDoc = $derived(expected ? expected.join('\n') : '')
   const answerPages = $derived(layout(answerDoc, settings))
+  const answerLines = $derived(answerPages.flatMap((p) => p.lines))
+  /** The correct braille can't be changed, but it has its own caret and selection, for copying.
+   *  Moving and selecting overwrite this; a new translation starts it over at the top. */
+  let answerCaret = $derived.by<Caret>(() => {
+    void answerDoc
+    return { cursor: 0, anchor: 0, goalCol: null }
+  })
+  const answerSelection = $derived({
+    start: Math.min(answerCaret.anchor, answerCaret.cursor),
+    end: Math.max(answerCaret.anchor, answerCaret.cursor),
+  })
   const mistakes = $derived(expected && settings.showMistakes ? findMistakes(doc, expected.join(' ')) : null)
-  const cellsTyped = $derived([...doc].filter(isCellChar).length)
   const selection = $derived({ start: Math.min(anchor, cursor), end: Math.max(anchor, cursor) })
   const hasSelection = $derived(selection.start < selection.end)
-  const selectedCells = $derived([...doc.slice(selection.start, selection.end)].filter(isCellChar).length)
+  /** The braille on screen. The status bar, copying and saving go by this. */
+  const shown = $derived(
+    view === 'typed'
+      ? { doc, pages, lines, cursor, selection, name: 'your braille' }
+      : {
+          doc: answerDoc,
+          pages: answerPages,
+          lines: answerLines,
+          cursor: answerCaret.cursor,
+          selection: answerSelection,
+          name: 'the correct braille',
+        },
+  )
+  const shownCells = $derived([...shown.doc].filter(isCellChar).length)
+  const selectedCells = $derived(
+    [...shown.doc.slice(shown.selection.start, shown.selection.end)].filter(isCellChar).length,
+  )
   const popupInfo = $derived.by(() => {
     const open = popup
     if (!open || !mistakes || view !== 'typed') return null
@@ -74,9 +100,9 @@
     return { ...describeMistake(mistakes, doc, mistakes.runs[index]), index: index + 1, total: mistakes.runs.length }
   })
   const position = $derived.by(() => {
-    const caret = locate(lines, cursor)
+    const caret = locate(shown.lines, shown.cursor)
     let rest = caret.line
-    for (const page of pages) {
+    for (const page of shown.pages) {
       if (rest < page.lines.length) return { page: page.number, line: rest + 1, cell: caret.col + 1 }
       rest -= page.lines.length
     }
@@ -200,15 +226,17 @@
     moveTo(end, { extend: true })
   }
 
-  // Ctrl/Cmd+C and X copy the selection in the format chosen under "Copy or save".
-  const selectedText = () => exportText(doc.slice(selection.start, selection.end), [], settings.exportFormat, false)
+  // Ctrl/Cmd+C and X copy the selection on screen in the format chosen under "Copy or save".
+  // Only your braille can be cut.
+  const selectedText = () =>
+    exportText(shown.doc.slice(shown.selection.start, shown.selection.end), [], settings.exportFormat, false)
   let clipboardEventSeen = false
 
   /** Lets the browser fire its copy/cut event (see onClipboard); if it doesn't, copies directly. */
   function copySelection(cut: boolean) {
-    if (!hasSelection) return
+    const { start, end } = shown.selection
+    if (start === end) return
     clipboardEventSeen = false
-    const { start, end } = selection
     const text = selectedText()
     setTimeout(async () => {
       if (clipboardEventSeen) return
@@ -220,11 +248,12 @@
   }
 
   function onClipboard(e: ClipboardEvent) {
-    if (!hasSelection || !e.clipboardData) return
+    const { start, end } = shown.selection
+    if (start === end || !e.clipboardData) return
     clipboardEventSeen = true
     e.preventDefault()
     e.clipboardData.setData('text/plain', selectedText())
-    if (e.type === 'cut') replaceRange(selection.start, selection.end, '', 'cut')
+    if (e.type === 'cut') replaceRange(start, end, '', 'cut')
   }
 
   function clearAll() {
@@ -287,21 +316,17 @@
   const redo = () => restore(redoStack, undoStack)
 
   /** Moves the cursor; with `extend`, the selection grows or shrinks instead of being dropped. */
-  function moveTo(pos: number, { keepGoal = false, extend = false } = {}) {
-    cursor = Math.max(0, Math.min(doc.length, pos))
-    if (!extend) anchor = cursor
-    lastEdit = { kind: '', time: 0 }
-    if (!keepGoal) goalCol = null
-    if (popup?.pinned) popup = null
-    revealCaret()
+  function moveTo(pos: number, { extend = false } = {}) {
+    setCaret(placeCaret({ cursor, anchor, goalCol }, pos, doc.length, extend))
   }
 
-  function moveVertical(direction: 1 | -1, extend = false) {
-    const here = locate(lines, cursor)
-    goalCol ??= here.col
-    const target = here.line + direction
-    const pos = target < 0 ? 0 : target >= lines.length ? doc.length : positionAtCol(lines[target], goalCol)
-    moveTo(pos, { keepGoal: true, extend })
+  function setCaret(next: Caret) {
+    cursor = next.cursor
+    anchor = next.anchor
+    goalCol = next.goalCol
+    lastEdit = { kind: '', time: 0 }
+    if (popup?.pinned) popup = null
+    revealCaret()
   }
 
   function revealCaret() {
@@ -371,7 +396,6 @@
     if (e.altKey && !isMac) return
     const primary = e.ctrlKey || e.metaKey // Ctrl, or Cmd on a Mac
     const byWord = e.ctrlKey || e.altKey // Ctrl, or Option on a Mac
-    const extend = e.shiftKey
     const line = lines[locate(lines, cursor).line]
 
     if (!primary && !e.altKey && ChordTracker.isDotKey(e.code)) {
@@ -381,6 +405,12 @@
         pendingDots = chord.pending
       }
       return
+    }
+
+    const moved = caretForKey(e, doc, lines, { cursor, anchor, goalCol })
+    if (moved) {
+      e.preventDefault()
+      return setCaret(moved)
     }
 
     switch (e.key) {
@@ -393,26 +423,6 @@
         if (e.metaKey) deleteTo(cursor === line.end ? cursor + 1 : line.end)
         else if (byWord) deleteTo(wordEndAfter(doc, cursor))
         else deleteTo(cursor + 1)
-        break
-      case 'ArrowLeft':
-      case 'ArrowRight': {
-        const left = e.key === 'ArrowLeft'
-        if (e.metaKey) moveTo(left ? line.start : line.end, { extend })
-        else if (byWord) moveTo(left ? wordStartBefore(doc, cursor) : wordEndAfter(doc, cursor), { extend })
-        else if (hasSelection && !extend) moveTo(left ? selection.start : selection.end)
-        else moveTo(cursor + (left ? -1 : 1), { extend })
-        break
-      }
-      case 'ArrowUp':
-      case 'ArrowDown':
-        if (e.metaKey) moveTo(e.key === 'ArrowUp' ? 0 : doc.length, { extend })
-        else moveVertical(e.key === 'ArrowUp' ? -1 : 1, extend)
-        break
-      case 'Home':
-        moveTo(primary ? 0 : line.start, { extend })
-        break
-      case 'End':
-        moveTo(primary ? doc.length : line.end, { extend })
         break
       case 'Enter':
         insert(primary ? '\f' : '\n')
@@ -483,6 +493,37 @@
     pendingDots = 0
   }
 
+  /** Switches between your braille and the correct braille, ready for the keyboard. */
+  function showView(next: typeof view) {
+    view = next
+    tick().then(() => paper?.focus())
+  }
+
+  // --- Correct braille ----------------------------------------------------------------
+  // It can't be changed, but moving, selecting and copying work as in your braille.
+
+  function moveAnswer(next: Caret) {
+    answerCaret = next
+    revealCaret()
+  }
+
+  function onAnswerKeyDown(e: KeyboardEvent) {
+    if (e.altKey && !isMac) return
+    const primary = (e.ctrlKey || e.metaKey) && !e.altKey
+    const moved = caretForKey(e, answerDoc, answerLines, answerCaret)
+    const key = e.key.toLowerCase()
+    if (moved) moveAnswer(moved)
+    else if (primary && key === 'a') answerCaret = { cursor: answerDoc.length, anchor: 0, goalCol: null }
+    else if (primary && key === 'c') return copySelection(false) // The browser now fires a copy event.
+    else if (e.key === 'Escape') {
+      if (answerSelection.start < answerSelection.end) moveAnswer(placeCaret(answerCaret, answerCaret.cursor, answerDoc.length))
+      else paper?.blur()
+    } else if (!e.ctrlKey && !e.metaKey && !e.altKey && ChordTracker.isDotKey(e.code)) {
+      if (!e.repeat) flash('The correct braille is read only. Switch to "Your braille" to type.')
+    } else return
+    e.preventDefault()
+  }
+
   // --- Export --------------------------------------------------------------------------
 
   function flash(message: string) {
@@ -491,14 +532,16 @@
     noticeTimer = setTimeout(() => (notice = ''), 2200)
   }
 
-  const exportedText = () => exportText(doc, pages, settings.exportFormat, settings.exportLayout)
+  // The Copy and Save buttons take all of the braille on screen: yours or the correct one.
+  const exportedText = () => exportText(shown.doc, shown.pages, settings.exportFormat, settings.exportLayout)
 
   async function copyExport() {
-    flash((await copyText(exportedText())) ? 'Copied to clipboard' : 'Could not copy')
+    flash((await copyText(exportedText())) ? `Copied ${shown.name}` : 'Could not copy')
   }
 
   function downloadExport() {
-    downloadText(exportedText(), settings.exportFormat === 'ascii' ? 'braille-ascii.txt' : 'braille-unicode.txt')
+    const name = view === 'answer' ? 'correct-braille' : 'braille'
+    downloadText(exportedText(), `${name}-${settings.exportFormat}.txt`)
   }
 
   const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`
@@ -514,13 +557,13 @@
     </div>
 
     <div class="segmented" role="tablist" aria-label="View">
-      <button role="tab" aria-selected={view === 'typed'} onclick={() => (view = 'typed')}>Your braille</button>
+      <button role="tab" aria-selected={view === 'typed'} onclick={() => showView('typed')}>Your braille</button>
       <button
         role="tab"
         aria-selected={view === 'answer'}
         disabled={!expected}
         title={expected ? undefined : 'Paste print text first'}
-        onclick={() => (view = 'answer')}>Correct braille</button
+        onclick={() => showView('answer')}>Correct braille</button
       >
     </div>
 
@@ -624,7 +667,19 @@
           {/if}
         </div>
       {:else}
-        <div class="paper readonly" aria-label="Correct braille">
+        <div
+          class="paper readonly"
+          bind:this={paper}
+          tabindex="0"
+          role="textbox"
+          aria-multiline="true"
+          aria-readonly="true"
+          aria-label="Correct braille, read only"
+          onkeydown={onAnswerKeyDown}
+          oncopy={onClipboard}
+          onfocus={() => (focused = true)}
+          onblur={() => (focused = false)}
+        >
           <BraillePages
             pages={answerPages}
             docLength={answerDoc.length}
@@ -632,40 +687,54 @@
             linesPerPage={settings.linesPerPage}
             paged={settings.pageBreaks}
             showMarks={settings.showMarks}
+            cursor={answerCaret.cursor}
+            selection={answerSelection.start < answerSelection.end ? answerSelection : null}
+            onpick={(pos, _, extend) => {
+              paper?.focus()
+              moveAnswer(placeCaret(answerCaret, pos, answerDoc.length, extend))
+            }}
+            ondrag={(pos) => moveAnswer(placeCaret(answerCaret, pos, answerDoc.length, true))}
+            ondoubleclick={(index) => {
+              const [start, end] = wordAt(answerDoc, index)
+              moveAnswer({ cursor: end, anchor: start, goalCol: null })
+            }}
           />
         </div>
       {/if}
 
       <footer class="statusbar">
         <ChordPreview dots={pendingDots} />
-        {#if view === 'typed'}
-          <div class="where">
-            <strong>Page {position.page}</strong>
-            <span>Line {position.line}</span>
-            <span>Cell {position.cell}</span>
-            {#if hasSelection}
-              <span class="selected-count">{plural(selectedCells, 'cell')} selected</span>
-            {:else}
-              <span class="muted">{plural(cellsTyped, 'cell')}</span>
+        <div class="where">
+          <strong>Page {position.page}</strong>
+          <span>Line {position.line}</span>
+          <span>Cell {position.cell}</span>
+          {#if shown.selection.start < shown.selection.end}
+            <span class="selected-count">{plural(selectedCells, 'cell')} selected</span>
+          {:else}
+            <span class="muted">{plural(shownCells, 'cell')}</span>
+          {/if}
+        </div>
+        <div class="keys">
+          {#if !focused}
+            <button class="link" onclick={() => paper?.focus()}
+              >{view === 'typed' ? 'Click the page to start typing' : 'Click the page to select and copy'}</button
+            >
+          {:else if view === 'typed'}
+            <span><kbd>Enter</kbd> new line</span>
+            <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> page break</span>
+            <span><kbd>Tab</kbd> indent</span>
+            {#if mistakes}
+              <span><kbd>F8</kbd> next mistake</span>
+              <span><kbd>H</kbd> explain mistake</span>
             {/if}
-          </div>
-          <div class="keys">
-            {#if focused}
-              <span><kbd>Enter</kbd> new line</span>
-              <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> page break</span>
-              <span><kbd>Tab</kbd> indent</span>
-              {#if mistakes}
-                <span><kbd>F8</kbd> next mistake</span>
-                <span><kbd>H</kbd> explain mistake</span>
-              {/if}
-              <span><kbd>Esc</kbd> leave page</span>
-            {:else}
-              <button class="link" onclick={() => paper?.focus()}>Click the page to start typing</button>
-            {/if}
-          </div>
-        {:else}
-          <div class="where"><strong>Correct braille</strong><span class="muted">read only</span></div>
-        {/if}
+            <span><kbd>Esc</kbd> leave page</span>
+          {:else}
+            <span>Read only</span>
+            <span><kbd>Ctrl</kbd>+<kbd>A</kbd> select all</span>
+            <span><kbd>Ctrl</kbd>+<kbd>C</kbd> copy</span>
+            <span><kbd>Esc</kbd> leave page</span>
+          {/if}
+        </div>
       </footer>
     </section>
 
@@ -741,7 +810,15 @@
       </section>
 
       <section class="card">
-        <h2>Copy or save</h2>
+        <div class="card-head">
+          <h2>Copy or save</h2>
+          <span
+            class="source"
+            class:answer={view === 'answer'}
+            title="Copy and Save take the braille you're looking at. Switch with the buttons at the top."
+            >{view === 'answer' ? 'Correct braille' : 'Your braille'}</span
+          >
+        </div>
         <div class="segmented full" role="radiogroup" aria-label="Format">
           <button role="radio" aria-checked={settings.exportFormat === 'unicode'} onclick={() => (settings.exportFormat = 'unicode')}
             >Unicode braille</button
@@ -762,8 +839,12 @@
           <span>Keep line and page breaks</span>
         </label>
         <div class="row">
-          <button class="primary" onclick={copyExport} disabled={doc.length === 0}>Copy</button>
-          <button onclick={downloadExport} disabled={doc.length === 0}>Save as .txt</button>
+          <button class="primary" onclick={copyExport} disabled={shown.doc.length === 0} title="Copy all of {shown.name}"
+            >Copy</button
+          >
+          <button onclick={downloadExport} disabled={shown.doc.length === 0} title="Save all of {shown.name} as a text file"
+            >Save as .txt</button
+          >
         </div>
       </section>
     </aside>
@@ -934,6 +1015,31 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface);
+  }
+
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  /* Which braille Copy and Save take. Highlighted when it isn't your own. */
+  .source {
+    padding: 1px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-2);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .source.answer {
+    border-color: transparent;
+    background: var(--accent-soft);
+    color: var(--accent);
   }
 
   h2 {

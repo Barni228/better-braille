@@ -6,14 +6,16 @@ Type braille on a normal keyboard and check it against the print text.
   a cell together; the cell is entered when you let go.
 - **Mistake checking.** Paste the print text (for example from OCR) and pick a braille code. Wrong
   cells get a red underline and missing cells get a red mark; hover or click one, or press `F8`,
-  to see what belongs there. "Correct braille" shows the whole correct translation.
+  to see what belongs there. "Correct braille" shows the whole correct translation, which you
+  can select and copy just like your own.
 - **OCR clean-up.** Words hyphenated across lines are joined again, and dashes and single quotes
   that OCR confuses (`-` vs `–`, `'` vs `‘ ’`) are guessed from context. Both can be turned off.
 - **Page layout.** Set cells per line, lines per page and tab width. Words wrap like they would on
   a braille page, and you can add manual page breaks.
-- **Copy or save** what you typed as Unicode braille (`⠃⠗⠇`) or as Braille ASCII (`BRL`, for
-  braille fonts and `.brf` files), with or without the line and page breaks, and **paste** either
-  format back in later.
+- **Copy or save** what you typed, or the correct braille, as Unicode braille (`⠃⠗⠇`) or as
+  Braille ASCII (`BRL`, for braille fonts and `.brf` files), with or without the line and page
+  breaks, and **paste** either format back in later. The Copy and Save buttons take whichever
+  braille is on screen; the label next to them says which.
 - **More room to type:** the Panel button hides the side panel.
 - **Works offline** and can be installed as an app. Everything stays in your browser.
 
@@ -38,6 +40,9 @@ Type braille on a normal keyboard and check it against the print text.
 | `F8` / `Shift`+`F8` | Next / previous mistake, with an explanation |
 | `H` | Explain the mistake at the cursor (press again to hide) |
 | `Esc` | Close the explanation, clear the selection, or leave the page (so `Tab` moves focus again) |
+
+In "Correct braille" the moves, selecting, `Ctrl`+`A` and `Ctrl`+`C` work the same, but it
+can't be changed.
 
 On a Mac, use `Cmd` instead of `Ctrl` and `Option` instead of `Ctrl` for word moves and
 deletes. `Cmd`+`Backspace` deletes to the start of the line, and `Cmd`+arrows go to the start
