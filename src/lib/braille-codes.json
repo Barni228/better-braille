@@ -1,6 +1,6 @@
 [
-  { "id": "en-ueb-g1", "label": "English UEB, Grade 1 (uncontracted)", "table": "en-ueb-g1.ctb" },
-  { "id": "en-ueb-g2", "label": "English UEB, Grade 2 (contracted)", "table": "en-ueb-g2.ctb" },
-  { "id": "en-us-g1", "label": "English EBAE, Grade 1 (uncontracted)", "table": "en-us-g1.ctb" },
-  { "id": "en-us-g2", "label": "English EBAE, Grade 2 (contracted)", "table": "en-us-g2.ctb" }
+  {"id": "en-ueb-g1", "label": "English UEB, Grade 1 (uncontracted)", "table": "en-ueb-g1.ctb", "quotes": "curly"},
+  {"id": "en-ueb-g2", "label": "English UEB, Grade 2 (contracted)", "table": "en-ueb-g2.ctb", "quotes": "curly"},
+  {"id": "en-us-g1", "label": "English EBAE, Grade 1 (uncontracted)", "table": "en-us-g1.ctb", "quotes": "straight"},
+  {"id": "en-us-g2", "label": "English EBAE, Grade 2 (contracted)", "table": "en-us-g2.ctb", "quotes": "straight"}
 ]

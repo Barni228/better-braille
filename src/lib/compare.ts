@@ -6,10 +6,15 @@ export interface Mistakes {
   wrong: Map<number, string>
   /** Typed character index → cells missing just before it (index === doc length: at the end). */
   missing: Map<number, string>
-  /** Where each separate mistake starts, in document order. */
-  spots: number[]
+  /** Each separate mistake as document positions [start, end), in document order. */
+  runs: MistakeRun[]
   /** Cells of the print text that come after what has been typed so far. */
   remaining: number
+}
+
+export interface MistakeRun {
+  start: number
+  end: number
 }
 
 interface Word {
@@ -76,7 +81,7 @@ function* changedRuns<T>(changes: { value: T[]; added: boolean; removed: boolean
  * typed text counts as "remaining" rather than missing.
  */
 export function findMistakes(typed: string, expected: string): Mistakes {
-  const result: Mistakes = { wrong: new Map(), missing: new Map(), spots: [], remaining: 0 }
+  const result: Mistakes = { wrong: new Map(), missing: new Map(), runs: [], remaining: 0 }
   const typedWords = splitWords(typed)
   const allExpected = splitWords(expected).map((w) => w.text)
   // Only diff against the part of the print text the typist can have reached; it keeps the
@@ -96,12 +101,33 @@ export function findMistakes(typed: string, expected: string): Mistakes {
   }
 
   const all = [...new Set([...result.wrong.keys(), ...result.missing.keys()])].sort((a, b) => a - b)
-  let previous = -2
   for (const pos of all) {
-    if (pos !== previous + 1) result.spots.push(pos)
-    previous = pos
+    const last = result.runs[result.runs.length - 1]
+    if (last && pos === last.end) last.end++
+    else result.runs.push({ start: pos, end: pos + 1 })
   }
   return result
+}
+
+/** The mistake at caret position `pos`, or right before it. */
+export function mistakeNear(m: Mistakes, pos: number): MistakeRun | undefined {
+  const contains = (p: number) => m.runs.find((r) => r.start <= p && p < r.end)
+  return contains(pos) ?? contains(pos - 1)
+}
+
+/** What was typed in a mistake, and what the print text has there instead. */
+export function describeMistake(m: Mistakes, doc: string, run: MistakeRun): { typed: string; expected: string } {
+  let typed = ''
+  let expected = ''
+  for (let i = run.start; i < run.end; i++) {
+    expected += m.missing.get(i) ?? ''
+    const should = m.wrong.get(i)
+    if (should !== undefined) {
+      typed += doc[i]
+      expected += should
+    }
+  }
+  return { typed, expected }
 }
 
 /** Marks one mismatched stretch: typed words `removed` where the print text has `added`. */

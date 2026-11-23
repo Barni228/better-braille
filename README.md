@@ -5,13 +5,16 @@ Type braille on a normal keyboard and check it against the print text.
 - **Six-key typing.** `F` `D` `S` are dots 1 2 3, and `J` `K` `L` are dots 4 5 6. Press the keys of
   a cell together; the cell is entered when you let go.
 - **Mistake checking.** Paste the print text (for example from OCR) and pick a braille code. Wrong
-  cells get a red underline (hover to see what belongs there) and missing cells get a red mark.
-  "Correct braille" shows the whole correct translation.
+  cells get a red underline and missing cells get a red mark; hover or click one, or press `F8`,
+  to see what belongs there. "Correct braille" shows the whole correct translation.
+- **OCR clean-up.** Words hyphenated across lines are joined again, and dashes and single quotes
+  that OCR confuses (`-` vs `–`, `'` vs `‘ ’`) are guessed from context. Both can be turned off.
 - **Page layout.** Set cells per line, lines per page and tab width. Words wrap like they would on
   a braille page, and you can add manual page breaks.
 - **Copy or save** what you typed as Unicode braille (`⠃⠗⠇`) or as Braille ASCII (`BRL`, for
   braille fonts and `.brf` files), with or without the line and page breaks, and **paste** either
   format back in later.
+- **More room to type:** the Panel button hides the side panel.
 - **Works offline** and can be installed as an app. Everything stays in your browser.
 
 ## Keys
@@ -27,7 +30,9 @@ Type braille on a normal keyboard and check it against the print text.
 | Arrows, `Home`, `End` | Move the cursor (`Ctrl`+`Home`/`End`: start/end of document) |
 | `Ctrl`+`V` | Paste Unicode braille or Braille ASCII at the cursor |
 | `Ctrl`+`Z` / `Ctrl`+`Shift`+`Z` | Undo / redo |
-| `Esc` | Leave the page (so `Tab` moves focus again) |
+| `F8` / `Shift`+`F8` | Next / previous mistake, with an explanation |
+| `H` | Explain the mistake at the cursor (press again to hide) |
+| `Esc` | Close the explanation, or leave the page (so `Tab` moves focus again) |
 
 Some keyboards can't register six keys at once, so a few chords may lose dots. If that happens,
 try another keyboard or test yours with an online "key rollover" tester.

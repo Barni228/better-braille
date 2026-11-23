@@ -11,6 +11,8 @@ export interface Settings {
   showMarks: boolean
   code: string
   rejoinHyphens: boolean
+  guessPunctuation: boolean
+  showSidebar: boolean
   showMistakes: boolean
   exportFormat: ExportFormat
   exportLayout: boolean
@@ -33,6 +35,8 @@ export const DEFAULT_SETTINGS: Settings = {
   showMarks: true,
   code: 'en-ueb-g2',
   rejoinHyphens: true,
+  guessPunctuation: true,
+  showSidebar: true,
   showMistakes: true,
   exportFormat: 'unicode',
   exportLayout: true,
@@ -45,7 +49,7 @@ export function sanitizeSettings(raw: unknown): Settings {
     const v = Number(s[key])
     s[key] = Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : DEFAULT_SETTINGS[key]
   }
-  for (const key of ['pageBreaks', 'showEmptyDots', 'showMarks', 'rejoinHyphens', 'showMistakes', 'exportLayout'] as const) {
+  for (const key of ['pageBreaks', 'showEmptyDots', 'showMarks', 'rejoinHyphens', 'guessPunctuation', 'showSidebar', 'showMistakes', 'exportLayout'] as const) {
     s[key] = typeof s[key] === 'boolean' ? s[key] : DEFAULT_SETTINGS[key]
   }
   if (!BRAILLE_CODES.some((c) => c.id === s.code)) s.code = DEFAULT_SETTINGS.code

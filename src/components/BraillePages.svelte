@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { DOT_CLASSES, cellDots, describeCells } from '../lib/braille'
+  import { DOT_CLASSES, cellDots } from '../lib/braille'
   import type { Page } from '../lib/layout'
 
   interface Props {
@@ -13,7 +13,10 @@
     cursor?: number | null
     wrong?: Map<number, string> | null
     missing?: Map<number, string> | null
-    onpick?: (pos: number) => void
+    /** Caret position that was clicked, and the mistake clicked on (if any). */
+    onpick?: (pos: number, mistake: number | null) => void
+    /** Called with the document position of the mistake under the mouse, or null. */
+    onmistakehover?: (pos: number | null) => void
   }
 
   let {
@@ -27,32 +30,41 @@
     wrong = null,
     missing = null,
     onpick,
+    onmistakehover,
   }: Props = $props()
 
   const lastLine = $derived(pages[pages.length - 1].lines.at(-1))
 
-  const wrongTitle = (cells: string) => (cells === '' ? 'Extra: not in the print text' : `Should be ${describeCells(cells)}`)
-  const missingTitle = (cells: string) => `Missing ${describeCells(cells)}`
+  // Mistakes are explained in a popup (see MistakePopup) rather than a native tooltip, which
+  // browsers don't show while the window is in the background.
+  function hover(event: PointerEvent) {
+    const el = (event.target as HTMLElement).closest<HTMLElement>('[data-mistake]')
+    onmistakehover?.(el ? Number(el.dataset.mistake) : null)
+  }
 
   function pick(event: PointerEvent) {
     if (!onpick || event.button !== 0) return
     const target = event.target as HTMLElement
+    const mistakeEl = target.closest<HTMLElement>('[data-mistake]')
+    const mistake = mistakeEl ? Number(mistakeEl.dataset.mistake) : null
     const item = target.closest<HTMLElement>('[data-i]')
     if (item) {
       const index = Number(item.dataset.i)
       const box = item.getBoundingClientRect()
       const after = item.dataset.eol === undefined && event.clientX > box.left + box.width / 2
-      onpick(after ? index + 1 : index)
-      return
+      onpick(after ? index + 1 : index, mistake)
+    } else if (mistake !== null) {
+      onpick(mistake, mistake) // the marker for missing cells
+    } else {
+      const line = target.closest<HTMLElement>('[data-end]')
+      if (line) onpick(Number(line.dataset.end), null)
     }
-    const line = target.closest<HTMLElement>('[data-end]')
-    if (line) onpick(Number(line.dataset.end))
   }
 </script>
 
 {#snippet marker(pos: number)}
   {#if missing?.has(pos)}
-    <span class="missing" title={missingTitle(missing.get(pos) ?? '')}></span>
+    <span class="missing" data-mistake={pos}></span>
   {/if}
   {#if cursor === pos}
     <span class="caret"></span>
@@ -66,6 +78,8 @@
   style:--cols={cellsPerLine}
   style:--rows={paged ? linesPerPage : 0}
   onpointerdown={pick}
+  onpointerover={hover}
+  onpointerleave={() => onmistakehover?.(null)}
 >
   {#each pages as page (page.number)}
     <section class="page" aria-label="Page {page.number}">
@@ -79,21 +93,19 @@
             {#each line.items as item}
               {@render marker(item.index)}
               {#if item.kind === 'cell'}
-                {@const should = wrong?.get(item.index)}
                 <span
                   class="cell {DOT_CLASSES[cellDots(item.char)]}"
-                  class:wrong={should !== undefined}
-                  title={should !== undefined ? wrongTitle(should) : undefined}
+                  class:wrong={wrong?.has(item.index)}
+                  data-mistake={wrong?.has(item.index) ? item.index : undefined}
                   data-i={item.index}
                 ></span>
               {:else if item.kind === 'space' || item.kind === 'tab'}
-                {@const should = wrong?.get(item.index)}
                 <span
                   class="cell blank"
                   class:tab={item.kind === 'tab'}
-                  class:wrong={should !== undefined}
+                  class:wrong={wrong?.has(item.index)}
                   style:--w={item.width}
-                  title={should !== undefined ? wrongTitle(should) : undefined}
+                  data-mistake={wrong?.has(item.index) ? item.index : undefined}
                   data-i={item.index}
                 ></span>
               {:else}

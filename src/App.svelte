@@ -2,17 +2,18 @@
   import { onMount, tick } from 'svelte'
   import BraillePages from './components/BraillePages.svelte'
   import ChordPreview from './components/ChordPreview.svelte'
+  import MistakePopup from './components/MistakePopup.svelte'
   import NumberField from './components/NumberField.svelte'
   import { cellChar, isCellChar } from './lib/braille'
   import { ChordTracker } from './lib/chord'
   import { BRAILLE_CODES } from './lib/codes'
-  import { findMistakes } from './lib/compare'
+  import { describeMistake, findMistakes, mistakeNear } from './lib/compare'
   import { copyText, downloadText, exportText, importText } from './lib/export'
   import { layout, locate, positionAtCol } from './lib/layout'
   import { translate } from './lib/louis'
   import { LIMITS, sanitizeSettings } from './lib/settings'
   import { load, save } from './lib/storage'
-  import { toParagraphs } from './lib/text'
+  import { guessPunctuation, toParagraphs } from './lib/text'
 
   interface Snapshot {
     doc: string
@@ -38,6 +39,11 @@
   let notice = $state('')
   let historySize = $state({ undo: 0, redo: 0 })
   let paper = $state<HTMLElement>()
+  /** The mistake explained in the popup. Pinned = opened from the keyboard or a button, so it
+   *  stays until dismissed; otherwise it follows the mouse. */
+  let popup = $state<{ start: number; pinned: boolean } | null>(null)
+  let popupEl = $state<HTMLElement>()
+  let popupPos = $state<{ left: number; top: number } | null>(null)
 
   const chord = new ChordTracker()
   const undoStack: Snapshot[] = []
@@ -45,6 +51,7 @@
   let lastEdit = { kind: '', time: 0 }
   let goalCol: number | null = null
   let noticeTimer: ReturnType<typeof setTimeout> | undefined
+  let hoverTimer: ReturnType<typeof setTimeout> | undefined
 
   const pages = $derived(layout(doc, settings))
   const lines = $derived(pages.flatMap((p) => p.lines))
@@ -52,6 +59,13 @@
   const answerPages = $derived(layout(answerDoc, settings))
   const mistakes = $derived(expected && settings.showMistakes ? findMistakes(doc, expected.join(' ')) : null)
   const cellsTyped = $derived([...doc].filter(isCellChar).length)
+  const popupInfo = $derived.by(() => {
+    const open = popup
+    if (!open || !mistakes || view !== 'typed') return null
+    const index = mistakes.runs.findIndex((r) => r.start === open.start)
+    if (index < 0) return null
+    return { ...describeMistake(mistakes, doc, mistakes.runs[index]), index: index + 1, total: mistakes.runs.length }
+  })
   const position = $derived.by(() => {
     const caret = locate(lines, cursor)
     let rest = caret.line
@@ -64,8 +78,10 @@
 
   // Translate the print text whenever it or the braille code changes (debounced).
   $effect(() => {
-    const paragraphs = toParagraphs(source, settings.rejoinHyphens)
-    const table = (BRAILLE_CODES.find((c) => c.id === settings.code) ?? BRAILLE_CODES[0]).table
+    const code = BRAILLE_CODES.find((c) => c.id === settings.code) ?? BRAILLE_CODES[0]
+    let paragraphs = toParagraphs(source, settings.rejoinHyphens)
+    if (settings.guessPunctuation) paragraphs = paragraphs.map((p) => guessPunctuation(p, code.quotes))
+    const table = code.table
     if (paragraphs.length === 0) {
       expected = null
       translating = false
@@ -107,6 +123,17 @@
 
   onMount(() => paper?.focus())
 
+  // Keep the popup next to its mistake as the text and layout change.
+  $effect(() => {
+    if (!popupInfo) {
+      popupPos = null
+      return
+    }
+    void pages
+    void settings.cellSize
+    tick().then(placePopup)
+  })
+
   // --- Editing -------------------------------------------------------------------------
 
   function syncHistory() {
@@ -130,6 +157,7 @@
     doc = next
     cursor = nextCursor
     goalCol = null
+    popup = null
     revealCaret()
   }
 
@@ -194,6 +222,7 @@
     cursor = Math.min(snapshot.cursor, snapshot.doc.length)
     lastEdit = { kind: '', time: 0 }
     goalCol = null
+    popup = null
     syncHistory()
     revealCaret()
   }
@@ -205,6 +234,7 @@
     cursor = Math.max(0, Math.min(doc.length, pos))
     lastEdit = { kind: '', time: 0 }
     if (!keepGoal) goalCol = null
+    if (popup?.pinned) popup = null
     revealCaret()
   }
 
@@ -221,14 +251,60 @@
     tick().then(() => paper?.querySelector('.caret')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }))
   }
 
-  function nextMistake() {
-    if (!mistakes || mistakes.spots.length === 0) return
+  // --- Mistakes -----------------------------------------------------------------------
+
+  /** Moves to the next (1) or previous (-1) mistake and explains it. */
+  function gotoMistake(direction: 1 | -1) {
+    if (!mistakes) return flash('Paste the print text to check for mistakes')
+    const runs = mistakes.runs
+    if (runs.length === 0) return flash('No mistakes')
+    const from = popup?.start ?? cursor
+    const run =
+      direction > 0
+        ? (runs.find((r) => r.start > from) ?? runs[0])
+        : (runs.findLast((r) => r.start < from) ?? runs[runs.length - 1])
     view = 'typed'
-    const spot = mistakes.spots.find((p) => p > cursor) ?? mistakes.spots[0]
     tick().then(() => {
       paper?.focus()
-      moveTo(spot)
+      moveTo(run.start)
+      popup = { start: run.start, pinned: true }
     })
+  }
+
+  /** Shows (or hides) the explanation of the mistake at the cursor. */
+  function explainAtCursor() {
+    if (popup?.pinned) return (popup = null)
+    if (!mistakes) return flash('Paste the print text to check for mistakes')
+    const run = mistakeNear(mistakes, cursor)
+    if (run) popup = { start: run.start, pinned: true }
+    else flash(mistakes.runs.length ? 'No mistake at the cursor. F8 jumps to the next one.' : 'No mistakes')
+  }
+
+  function onMistakeHover(pos: number | null) {
+    clearTimeout(hoverTimer)
+    const run = pos === null ? undefined : mistakes?.runs.find((r) => r.start <= pos && pos < r.end)
+    if (!run) {
+      if (popup && !popup.pinned) hoverTimer = setTimeout(() => popup?.pinned || (popup = null), 300)
+      return
+    }
+    if (popup?.start === run.start) return
+    hoverTimer = setTimeout(() => (popup = { start: run.start, pinned: false }), popup ? 0 : 150)
+  }
+
+  /** Puts the popup under its mistake, or above it if there's no room below. */
+  function placePopup() {
+    const anchor = popup && paper?.querySelector<HTMLElement>(`[data-mistake="${popup.start}"]`)
+    if (!paper || !anchor) return (popupPos = null)
+    const box = paper.getBoundingClientRect()
+    const at = anchor.getBoundingClientRect()
+    const width = popupEl?.offsetWidth ?? 300
+    const height = popupEl?.offsetHeight ?? 120
+    const minLeft = paper.scrollLeft + 8
+    const maxLeft = paper.scrollLeft + paper.clientWidth - width - 8
+    const left = Math.max(minLeft, Math.min(maxLeft, at.left - box.left + paper.scrollLeft - 16))
+    const below = at.bottom + 6 + height <= box.bottom || at.top - 6 - height < box.top
+    const top = (below ? at.bottom + 6 : at.top - 6 - height) - box.top + paper.scrollTop
+    popupPos = { left, top }
   }
 
   // --- Keyboard ------------------------------------------------------------------------
@@ -256,6 +332,13 @@
       return // Leave other shortcuts (copy, find, reload, ...) to the browser.
     }
     if (e.altKey) return
+
+    // H (next to J, and not a dot key) explains the mistake at the cursor.
+    if (e.code === 'KeyH') {
+      e.preventDefault()
+      if (!e.repeat) explainAtCursor()
+      return
+    }
 
     if (ChordTracker.isDotKey(e.code)) {
       e.preventDefault()
@@ -303,7 +386,8 @@
         moveTo(line.end)
         break
       case 'Escape':
-        paper?.blur()
+        if (popup) popup = null
+        else paper?.blur()
         break
       default:
         return
@@ -317,6 +401,13 @@
     const dots = chord.release(e.code)
     pendingDots = chord.pending
     if (dots) insert(cellChar(dots))
+  }
+
+  function onWindowKeyDown(e: KeyboardEvent) {
+    if (e.key === 'F8' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault()
+      gotoMistake(e.shiftKey ? -1 : 1)
+    }
   }
 
   function dropChord() {
@@ -345,7 +436,7 @@
   const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`
 </script>
 
-<svelte:window onblur={dropChord} />
+<svelte:window onblur={dropChord} onkeydown={onWindowKeyDown} onresize={placePopup} />
 
 <div class="app" class:no-empty-dots={!settings.showEmptyDots} style:--cw="{settings.cellSize}px">
   <header class="topbar">
@@ -365,15 +456,47 @@
       >
     </div>
 
+    {#if mistakes}
+      <div class="mistake-nav">
+        {#if mistakes.runs.length === 0}
+          <span class="clean">✓ No mistakes</span>
+        {:else}
+          <button class="icon" onclick={() => gotoMistake(-1)} title="Previous mistake (Shift+F8)" aria-label="Previous mistake"
+            >‹</button
+          >
+          <button class="count" onclick={() => gotoMistake(1)} title="Show the next mistake (F8)"
+            >{plural(mistakes.runs.length, 'mistake')}</button
+          >
+          <button class="icon" onclick={() => gotoMistake(1)} title="Next mistake (F8)" aria-label="Next mistake">›</button>
+        {/if}
+      </div>
+    {:else if translating}
+      <span class="checking">Checking…</span>
+    {/if}
+
     <div class="toolbar">
       <button class="ghost" onclick={pasteFromClipboard} title="Paste Unicode braille or Braille ASCII (Ctrl+V)">Paste</button>
       <button class="ghost" onclick={undo} disabled={historySize.undo === 0} title="Undo (Ctrl+Z)">Undo</button>
       <button class="ghost" onclick={redo} disabled={historySize.redo === 0} title="Redo (Ctrl+Shift+Z)">Redo</button>
       <button class="ghost danger" onclick={clearAll} disabled={doc.length === 0}>Clear</button>
+      <span class="divider" aria-hidden="true"></span>
+      <button
+        class="ghost panel-toggle"
+        onclick={() => (settings.showSidebar = !settings.showSidebar)}
+        aria-pressed={settings.showSidebar}
+        title={settings.showSidebar ? 'Hide the side panel' : 'Show the side panel'}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M15 4v16" />
+          {#if settings.showSidebar}<path d="M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4z" fill="currentColor" stroke="none" />{/if}
+        </svg>
+        <span>Panel</span>
+      </button>
     </div>
   </header>
 
-  <main class="workspace">
+  <main class="workspace" class:no-sidebar={!settings.showSidebar}>
     <section class="editor">
       {#if view === 'typed'}
         <div
@@ -402,11 +525,29 @@
             {cursor}
             wrong={mistakes?.wrong}
             missing={mistakes?.missing}
-            onpick={(pos) => {
+            onpick={(pos, mistake) => {
               paper?.focus()
               moveTo(pos)
+              // Clicking a mistake explains it (also on touch screens, which have no hover).
+              const run = mistake === null ? undefined : mistakes?.runs.find((r) => r.start <= mistake && mistake < r.end)
+              if (run) popup = { start: run.start, pinned: true }
             }}
+            onmistakehover={onMistakeHover}
           />
+          {#if popupInfo}
+            <MistakePopup
+              {...popupInfo}
+              bind:element={popupEl}
+              left={popupPos?.left ?? 0}
+              top={popupPos?.top ?? 0}
+              visible={popupPos !== null}
+              onprev={() => gotoMistake(-1)}
+              onnext={() => gotoMistake(1)}
+              onclose={() => (popup = null)}
+              onpointerenter={() => clearTimeout(hoverTimer)}
+              onpointerleave={() => onMistakeHover(null)}
+            />
+          {/if}
         </div>
       {:else}
         <div class="paper readonly" aria-label="Correct braille">
@@ -432,10 +573,13 @@
           </div>
           <div class="keys">
             {#if focused}
-              <span><kbd>Space</kbd> space</span>
               <span><kbd>Enter</kbd> new line</span>
               <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> page break</span>
               <span><kbd>Tab</kbd> indent</span>
+              {#if mistakes}
+                <span><kbd>F8</kbd> next mistake</span>
+                <span><kbd>H</kbd> explain mistake</span>
+              {/if}
               <span><kbd>Esc</kbd> leave page</span>
             {:else}
               <button class="link" onclick={() => paper?.focus()}>Click the page to start typing</button>
@@ -447,6 +591,7 @@
       </footer>
     </section>
 
+    {#if settings.showSidebar}
     <aside class="sidebar">
       <section class="card">
         <h2>Check against print</h2>
@@ -472,6 +617,10 @@
           <span>Join words hyphenated across lines</span>
         </label>
         <label class="check">
+          <input type="checkbox" bind:checked={settings.guessPunctuation} />
+          <span>Guess OCR dashes and quotes</span>
+        </label>
+        <label class="check">
           <input type="checkbox" bind:checked={settings.showMistakes} />
           <span>Underline mistakes</span>
         </label>
@@ -480,18 +629,8 @@
           <p class="status error">Couldn't translate: {translateError}</p>
         {:else if translating && !expected}
           <p class="status muted">Translating…</p>
-        {:else if expected && mistakes}
-          <div class="status">
-            {#if mistakes.spots.length === 0}
-              <span class="ok">No mistakes so far</span>
-            {:else}
-              <span class="bad">{plural(mistakes.spots.length, 'mistake')}</span>
-              <button class="small" onclick={nextMistake}>Next mistake</button>
-            {/if}
-            {#if mistakes.remaining > 0}
-              <span class="muted">{plural(mistakes.remaining, 'cell')} left to type</span>
-            {/if}
-          </div>
+        {:else if mistakes && mistakes.remaining > 0}
+          <p class="status muted">{plural(mistakes.remaining, 'cell')} left to type</p>
         {/if}
         {#if louisVersion}
           <p class="hint">Translated with liblouis {louisVersion}</p>
@@ -550,6 +689,7 @@
         </div>
       </section>
     </aside>
+    {/if}
   </main>
 
   {#if notice}
@@ -601,6 +741,61 @@
     min-height: 0;
   }
 
+  .workspace.no-sidebar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mistake-nav {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-2);
+  }
+
+  .mistake-nav button {
+    border: 0;
+    background: transparent;
+    padding: 4px 8px;
+  }
+
+  .mistake-nav .icon {
+    width: 28px;
+    padding: 4px 0;
+    font-size: 18px;
+    line-height: 1;
+    color: var(--muted);
+  }
+
+  .mistake-nav .count {
+    color: var(--error);
+    font-weight: 650;
+  }
+
+  .mistake-nav .clean {
+    padding: 4px 10px;
+    color: var(--ok);
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .checking {
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  .toolbar .divider {
+    width: 1px;
+    margin: 6px 4px;
+    background: var(--border);
+  }
+
+  .panel-toggle[aria-pressed='true'] {
+    color: var(--accent);
+  }
+
   .editor {
     display: flex;
     flex-direction: column;
@@ -613,6 +808,7 @@
   }
 
   .paper {
+    position: relative;
     flex: 1;
     overflow: auto;
     outline: none;
@@ -712,12 +908,6 @@
     font-size: 14px;
   }
 
-  .ok {
-    color: var(--ok);
-    font-weight: 600;
-  }
-
-  .bad,
   .error {
     color: var(--error);
     font-weight: 600;
