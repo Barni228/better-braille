@@ -16,30 +16,25 @@ Type braille on a normal keyboard and check it against the print text.
   Braille ASCII (`BRL`, for braille fonts and `.brf` files), with or without the line and page
   breaks, and **paste** either format back in later. The Copy and Save buttons take whichever
   braille is on screen; the label next to them says which.
-- **More room to type:** the Panel button hides the side panel.
 - **Works offline** and can be installed as an app. Everything stays in your browser.
 
 ## Keys
 
-| Key | Does |
-| --- | --- |
-| `F` `D` `S` `J` `K` `L` together | Type one braille cell (replaces the selection, if any) |
-| `Space` | Space |
-| `Enter` | New line |
-| `Ctrl`+`Enter` | Page break |
-| `Tab` | Jump to the next tab stop |
-| `Backspace` / `Delete` | Delete before / after the cursor, or the selection |
-| `Ctrl`+`Backspace` / `Ctrl`+`Delete` | Delete the word before / after the cursor |
-| `Ctrl`+`Shift`+`Backspace` | Delete to the start of the line |
-| Arrows, `Home`, `End` | Move the cursor (`Ctrl`+`Home`/`End`: start/end of document) |
-| `Ctrl`+`←` / `Ctrl`+`→` | Move one word |
-| `Shift` + any move, or drag, or `Shift`+click | Select; double-click selects a word |
-| `Ctrl`+`A` | Select everything |
-| `Ctrl`+`C` / `Ctrl`+`X` / `Ctrl`+`V` | Copy / cut / paste (copies in the format chosen under "Copy or save") |
-| `Ctrl`+`Z` / `Ctrl`+`Shift`+`Z` | Undo / redo (one word at a time) |
-| `F8` / `Shift`+`F8` | Next / previous mistake, with an explanation |
-| `H` | Explain the mistake at the cursor (press again to hide) |
-| `Esc` | Close the explanation, clear the selection, or leave the page (so `Tab` moves focus again) |
+| Key                              | Does                                                             |
+| -------------------------------- | ---------------------------------------------------------------- |
+| `F` `D` `S` `J` `K` `L` together | Type one braille cell                                            |
+| `Space`                          | Space                                                            |
+| `Enter`                          | New line                                                         |
+| `Ctrl`+`Enter`                   | Page break                                                       |
+| `Tab`                            | Jump to the next tab stop                                        |
+| `Backspace` / `Delete`           | Delete before / after the cursor, or the selection               |
+| `Ctrl`+`C` / `Ctrl`+`V`          | Copy / paste (copies in the format chosen under "Copy or save")  |
+| `Ctrl`+`Z` / `Ctrl`+`Shift`+`Z`  | Undo / redo (one word at a time)                                 |
+| `F8` / `Shift`+`F8`              | Next / previous mistake, with an explanation                     |
+| `H`                              | Explain the mistake at the cursor (press again to hide)          |
+| `Esc`                            | Close the explanation, clear the selection, or un-focus the page |
+
+All the usual text editing shortcuts work too (like `ctrl backspace` or `opt backspace` on mac)
 
 In "Correct braille" the moves, selecting, `Ctrl`+`A` and `Ctrl`+`C` work the same, but it
 can't be changed.
@@ -105,18 +100,10 @@ Install button and the Paste button don't work there (Ctrl+V does). To test thos
 `chrome://flags/#unsafely-treat-insecure-origin-as-secure` (or `edge://flags/...` in Edge), add
 the address, e.g. `http://my-mac.local:4173`, and relaunch the browser.
 
-## Deploy to GitHub Pages
-
-1. Create a **public** repository on GitHub and push this project to its `main` branch.
-2. In the repository, open **Settings → Pages** and set **Source** to **GitHub Actions**.
-3. Every push to `main` now tests, builds and deploys the app (see
-   `.github/workflows/deploy.yml`). The address is shown in the workflow run and in
-   Settings → Pages, usually `https://<your-username>.github.io/<repo-name>/`.
-
 ## Adding a braille code
 
 Add an entry to `src/lib/braille-codes.json` with a liblouis table name (see
-`node_modules/liblouis-build/tables/`). The build copies that table and the tables it includes
+`vendor/liblouis/tables/`). The build copies that table and the tables it includes
 into `public/liblouis/`.
 
 ## liblouis
